@@ -663,6 +663,12 @@ AVAILABLE CAPSULES (use these in capsuleId):
 - chat: Chat message bubbles
 - qrcode: QR code generator
 - notifications: Push notification UI
+- scanner: QR/barcode scanner
+- audio: Audio player with controls
+- skeleton: Loading placeholder with shimmer
+- stepper: Numeric input with +/- buttons
+- signature: Signature capture pad
+- confetti: Celebration animation effect
 
 RESPONSE FORMAT:
 Return ONLY valid JSON (no markdown, no explanation). Use this structure:
