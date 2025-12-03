@@ -3,9 +3,10 @@ import cors from 'cors'
 
 const app = express()
 const PORT = process.env.PORT || 3001
+const GROQ_API_KEY = process.env.GROQ_API_KEY
 
 app.use(cors())
-app.use(express.json())
+app.use(express.json({ limit: '10mb' }))
 
 // ============================================
 // SCHEMA
@@ -623,6 +624,276 @@ app.post('/generate', (req, res) => {
   }
 })
 
+// ============================================
+// AI GENERATION WITH GROQ
+// ============================================
+
+const SYSTEM_PROMPT = `You are HubLab AI, an assistant that generates mobile app specifications in JSON format.
+
+AVAILABLE CAPSULES (use these in capsuleId):
+- button: Text button with variants (primary, secondary, outline, ghost)
+- text: Display text with variants (heading, subheading, body, caption)
+- input: Text input with placeholder, label, type (text, email, password, number)
+- card: Container with title, elevation, children
+- image: Display image with src, alt, aspectRatio
+- list: Scrollable list with items, separator
+- modal: Popup dialog with title, content
+- form: Form container with onSubmit
+- chart: Data visualization (line, bar, pie)
+- progress: Progress indicator (linear, circular) with value 0-100
+- switch: Toggle switch with label, checked
+- slider: Range slider with min, max, value
+- tabs: Tab navigation with items
+- accordion: Collapsible sections
+- dropdown: Select dropdown with options
+- datepicker: Date selection
+- calendar: Full calendar view
+- searchbar: Search input with placeholder
+- rating: Star rating with max, value
+- chip: Tag/chip with label, removable
+- divider: Visual separator
+- avatar: User avatar with src, name, size
+- badge: Status badge with label, variant
+- tooltip: Hover tooltip
+- table: Data table with columns, rows
+- carousel: Image/content carousel
+- timeline: Vertical timeline
+- map: Interactive map
+- video: Video player
+- chat: Chat message bubbles
+- qrcode: QR code generator
+- notifications: Push notification UI
+
+RESPONSE FORMAT:
+Return ONLY valid JSON (no markdown, no explanation). Use this structure:
+{
+  "name": "App Name",
+  "version": "1.0.0",
+  "targets": ["ios", "android"],
+  "theme": {
+    "colors": {
+      "primary": "#6366F1",
+      "secondary": "#8B5CF6",
+      "background": "#FFFFFF",
+      "surface": "#F8FAFC",
+      "text": { "primary": "#1E293B", "secondary": "#64748B" }
+    }
+  },
+  "navigation": { "type": "tabs" or "stack", "initialScreen": "screenId" },
+  "screens": [
+    {
+      "id": "screen-id",
+      "name": "Screen Name",
+      "root": {
+        "id": "unique-id",
+        "capsuleId": "card",
+        "props": { ... },
+        "children": [ ... ]
+      }
+    }
+  ]
+}
+
+RULES:
+1. Use lowercase-kebab-case for all IDs
+2. Every capsule needs: id, capsuleId, props
+3. Match the app description with appropriate capsules
+4. Design realistic, complete apps with 2-4 screens
+5. Use semantic component hierarchy (cards contain content, lists contain items)
+6. Choose colors that match the app's theme/purpose
+7. ONLY output JSON, nothing else`
+
+const CAPSULE_LIST = schema.definitions.CapsuleInstance.properties.capsuleId.enum
+
+app.post('/ai/generate', async (req, res) => {
+  try {
+    const { prompt } = req.body
+
+    if (!prompt) {
+      return res.status(400).json({ error: 'Missing prompt' })
+    }
+
+    if (!GROQ_API_KEY) {
+      return res.status(500).json({ error: 'GROQ_API_KEY not configured' })
+    }
+
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${GROQ_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: `Create a mobile app for: ${prompt}` }
+        ],
+        temperature: 0.7,
+        max_tokens: 4000
+      })
+    })
+
+    if (!response.ok) {
+      const error = await response.text()
+      console.error('Groq API error:', error)
+      return res.status(500).json({ error: 'AI generation failed', details: error })
+    }
+
+    const data = await response.json()
+    const content = data.choices[0]?.message?.content
+
+    if (!content) {
+      return res.status(500).json({ error: 'No content from AI' })
+    }
+
+    // Parse the JSON from AI response
+    let project
+    try {
+      // Clean up potential markdown formatting
+      const jsonStr = content.replace(/^```json?\n?/i, '').replace(/\n?```$/i, '').trim()
+      project = JSON.parse(jsonStr)
+    } catch (parseError) {
+      console.error('JSON parse error:', parseError, 'Content:', content)
+      return res.status(500).json({
+        error: 'Failed to parse AI response',
+        raw: content
+      })
+    }
+
+    // Validate basic structure
+    if (!project.name || !project.screens) {
+      return res.status(500).json({
+        error: 'Invalid project structure from AI',
+        project
+      })
+    }
+
+    // Ensure required fields have defaults
+    project.version = project.version || '1.0.0'
+    project.targets = project.targets || ['ios', 'android']
+    project.theme = project.theme || { colors: { primary: '#6366F1' } }
+
+    res.json({
+      success: true,
+      project,
+      message: `Generated "${project.name}" with ${project.screens.length} screens`
+    })
+
+  } catch (error) {
+    console.error('AI generation error:', error)
+    res.status(500).json({ error: 'AI generation failed', details: error.message })
+  }
+})
+
+// Combined endpoint: AI generate + code generation
+app.post('/ai/build', async (req, res) => {
+  try {
+    const { prompt, targets = ['ios', 'android'] } = req.body
+
+    if (!prompt) {
+      return res.status(400).json({ error: 'Missing prompt' })
+    }
+
+    if (!GROQ_API_KEY) {
+      return res.status(500).json({ error: 'GROQ_API_KEY not configured' })
+    }
+
+    // Step 1: Generate project JSON with AI
+    const aiResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${GROQ_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: `Create a mobile app for: ${prompt}. Target platforms: ${targets.join(', ')}` }
+        ],
+        temperature: 0.7,
+        max_tokens: 4000
+      })
+    })
+
+    if (!aiResponse.ok) {
+      const error = await aiResponse.text()
+      return res.status(500).json({ error: 'AI generation failed', details: error })
+    }
+
+    const aiData = await aiResponse.json()
+    const content = aiData.choices[0]?.message?.content
+
+    let project
+    try {
+      const jsonStr = content.replace(/^```json?\n?/i, '').replace(/\n?```$/i, '').trim()
+      project = JSON.parse(jsonStr)
+    } catch (e) {
+      return res.status(500).json({ error: 'Failed to parse AI response', raw: content })
+    }
+
+    // Ensure targets
+    project.targets = targets
+    project.version = project.version || '1.0.0'
+    project.theme = project.theme || { colors: { primary: '#6366F1' } }
+
+    // Step 2: Generate native code
+    const results = []
+    let totalCapsules = 0
+
+    for (const screen of project.screens) {
+      totalCapsules += countCapsules(screen.root)
+    }
+
+    for (const target of project.targets) {
+      let files = []
+
+      switch (target) {
+        case 'ios':
+          files = generateSwiftUI(project)
+          break
+        case 'android':
+          files = generateJetpackCompose(project)
+          break
+        case 'web':
+        case 'desktop':
+          files = generateReact(project)
+          break
+      }
+
+      results.push({
+        success: true,
+        platform: target,
+        files,
+        metadata: {
+          capsuleCount: totalCapsules,
+          screenCount: project.screens.length,
+          generatedAt: new Date().toISOString()
+        }
+      })
+    }
+
+    res.json({
+      success: true,
+      prompt,
+      project,
+      results,
+      summary: {
+        totalPlatforms: results.length,
+        totalFiles: results.reduce((sum, r) => sum + r.files.length, 0),
+        totalCapsules,
+        totalScreens: project.screens.length
+      }
+    })
+
+  } catch (error) {
+    console.error('AI build error:', error)
+    res.status(500).json({ error: 'AI build failed', details: error.message })
+  }
+})
+
 app.listen(PORT, () => {
   console.log(`🚀 HubLab API running on port ${PORT}`)
+  console.log(`🤖 Groq AI: ${GROQ_API_KEY ? 'configured' : 'NOT configured'}`)
 })
